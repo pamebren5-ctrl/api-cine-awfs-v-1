@@ -44,4 +44,4 @@ jobs:
 
       - name: push-a-docker
         run: docker push ${{ secrets.DOCKER_USERNAME }}/api-cine:${{ github.sha }} |
-          echo "imagen subida a docker hub"
+          echo "imagen subida a dockerhub"
