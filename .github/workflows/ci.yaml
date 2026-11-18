@@ -44,5 +44,60 @@ jobs:
 
       - name: push-a-docker
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/api-cine:${{ github.sha }} 
+          docker push ${{ secrets.DOCKER_USERNAME }}/api-cine:${{ github.sha }}
           echo "imagen subida a dockerhub"
+
+  despliegue:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: desplegar-y-verificar-con-rollback
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            set -e
+            cd /opt/cine-app
+            NEW_TAG="${{ github.sha }}"
+            PREV_TAG=$(grep '^BACKEND_TAG=' .env | cut -d '=' -f2)
+            echo "Version anterior backend: $PREV_TAG"
+            echo "Nueva version backend: $NEW_TAG"
+
+            rollback() {
+              echo "Fallo detectado en backend. Ejecutando rollback a $PREV_TAG..."
+              sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=$PREV_TAG/" .env
+              docker compose up -d backend
+              exit 1
+            }
+
+            sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=$NEW_TAG/" .env
+            docker compose pull backend || rollback
+            docker compose up -d backend || rollback
+
+            echo "Esperando verificacion de salud de cine_backend_prod..."
+            HEALTHY=false
+            for i in $(seq 1 12); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' cine_backend_prod 2>/dev/null || echo "starting")
+              echo "Intento $i/12 - Estado contenedor: $STATUS"
+              if [ "$STATUS" = "healthy" ]; then
+                HEALTHY=true
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$HEALTHY" != "true" ]; then
+              rollback
+            fi
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/v1/peliculas || echo "000")
+            echo "Respuesta HTTP backend (/api/v1/peliculas): $HTTP_CODE"
+            if [ "$HTTP_CODE" != "200" ]; then
+              rollback
+            fi
+
+            echo "Despliegue de backend exitoso y verificado. Versiones locales conservadas:"
+            docker images | grep pamebren/api-cine
